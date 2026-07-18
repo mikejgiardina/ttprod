@@ -47,7 +47,8 @@
       "id": "OBL-TRM-ACT-068X",
       "subject": { "kind": "charge", "ref": "TRM-ACT", "rev": "0681", "proposed_split_from": "TRM-ACT" },
       "label": "Trauma team activation, rev 068x",
-      "trigger": { "any_of": ["trauma activation", "trauma team activation", "level one", "level 1 activation"] },
+      "trigger": { "any_of": ["trauma activation", "trauma team activation", "level one", "level 1 activation", "level 1 trauma"] },
+      "_stt_aliases": "'level 1 trauma' (audit wl4m5pkw3): the resus is called as 'level 1 trauma coming in', not the formal 'trauma activation' — none of the four fire, dropping the $2450 activation charge. Clean vs the cross-bay must_not_fire (which carries 'level one', not 'level 1 trauma').",
       "requires": { "all_of": [
         { "id": "criteria_met",     "predicate": "lattice.TRAUMA_ACTIVATION_CRITERIA.any_criterion_satisfied === true" },
         { "id": "documented",       "affirm": ["trauma activation", "level one", "level 1"] },
@@ -98,9 +99,9 @@
         "_pause_note": "Per ACEP, the critical-care clock PAUSES during separately reportable procedures. Chest tube (T+3:40), central line (T+4:40) and FAST (T+10:40) all pause it. Real accrued time is well under the 8:20 wall-clock."
       },
       "material_for": ["qualification"],
-      "terminal": { "at": "disposition", "if_open": "unresolved", "report": "page2_gap", "dollar_impact": 325.00 },
+      "terminal": { "at": "disposition", "if_open": "unresolved", "report": "page2_gap", "dollar_impact": 325.00, "flag": "endpoint_not_noted", "_flag_rule": "GENERAL RULE (Mike, 2026-07-18): any timed/clocked obligation whose completion endpoint falls past the captured recording window is flagged 'endpoint not noted' on the code sheet — NOT shown as a decline/drop. Applies here (30-min clock vs ~3:45 recording) and to the coupled OBL-TRM-ACT-G0390." },
       "_demo_expectation": "UNRESOLVED / NOT BILLED. Starts T+2:40, patient departs T+11:00 = ~8:20 wall-clock, less with pauses. Gate says >=30.",
-      "_gap_text": "Critical care time: started T+2:40, patient departed T+11:00 -> 8 min documented in-bay (less, excluding separately-reportable procedures). CPT 99291 requires >=30 min. Not billed. Time likely continued in the OR — reconcile against total documented critical care.",
+      "_gap_text": "⚑ Endpoint not noted — critical care time was started, but its endpoint falls past the captured encounter window (CPT 99291 needs >=30 min continuous; the recording ends first). Not a decline: flagged for endpoint capture and reconciliation against total documented critical care.",
       "⚠️_fixture_conflict": "expected_extraction.json (v1, a 3:45 case) fires CC-TIME as documented:true at T+3:15 — billing 99291 on ~35 seconds, contradicting its own gate. NOT EDITED (instructed; it is the hand-validated golden fixture). Flagging only. Note it is '11/11 validated' — so validation did not check gates against elapsed time.",
       "_why_this_is_good": "Declining $325 with a citation, and saying where the rest of the money went, is worth more on stage than a green checkmark."
     },
@@ -153,7 +154,8 @@
       "id": "OBL-PRC-FAST-DOC",
       "subject": { "kind": "charge", "ref": "PRC-FAST", "cpt": "76705" },
       "label": "FAST: stored image + written interpretation",
-      "trigger": { "any_of": ["fast exam", "efast", "doing a fast", "focused assessment"] },
+      "trigger": { "any_of": ["fast exam", "efast", "doing a fast", "focused assessment", "e fast"] },
+      "_stt_aliases": "'e fast' (audit wl4m5pkw3): the acronym is spoken letter-E + 'fast', so Deepgram renders TWO tokens 'e fast', which the single-token 'efast' misses. Deliberately NOT bare 'fast' — it whole-token matches the negated/homophone must_not_fire lines ('never got the fast', 'fast, ED pace').",
       "trigger_guard": {
         "not_negated": true,
         "min_tokens": 2,
@@ -175,7 +177,8 @@
       "id": "OBL-IV-ACC2-LARGEBORE",
       "subject": { "kind": "charge", "ref": "IV-ACC2", "cpt": "36000" },
       "label": "IV access: two sites, large-bore",
-      "trigger": { "any_of": ["iv access", "large-bore", "two lines", "peripheral iv"] },
+      "trigger": { "any_of": ["iv access", "large-bore", "two lines", "peripheral iv", "16 gauge", "sixteen gauge", "large bores", "two large bores"] },
+      "_stt_aliases": "'16 gauge' / 'sixteen gauge' added from the real demo audio (7_18 / 0718(2).MP3): the placement line is 'left AC and right forearm, 16 gauge' — none of the original four fire on it, so the $95 charge silently dropped even though the atoms (count_2, gauge) satisfy. Deliberately NOT adding 'both lines': collision_corpus COL-002 ('Both lines are in — sixteen and sixteen') is a readback that must_not_fire IV-ACC2, and this obligation has NO idempotency_key, so 'both lines' would double-bill the $95. '16 gauge' fires once on placement and is absent from the 'sixteen and sixteen' readback (whole-token match).",
       "requires": { "all_of": [
         { "id": "count_2", "predicate": "values.iv_sites >= 2", "affirm": ["times two", "x2", "two", "both"] },
         { "id": "gauge",   "predicate": "values.iv_gauge <= 16", "affirm": ["sixteen-gauge", "16 gauge", "fourteen-gauge", "14 gauge", "large-bore"] }
@@ -191,7 +194,8 @@
       "id": "OBL-LAB-TCX-UNITS",
       "subject": { "kind": "charge", "ref": "LAB-TCX", "cpt": "86921", "unit_basis": "per_unit" },
       "label": "Type & crossmatch — unit count and technique",
-      "trigger": { "any_of": ["type and cross", "type and crossmatch", "crossmatch"] },
+      "trigger": { "any_of": ["type and cross", "type and crossmatch", "crossmatch", "typing cross", "typed and crossed"] },
+      "_stt_aliases": "'typing cross' added from the real demo audio: STT heard 'type and cross' as 'sending a TYPING CROSS for two' — without it the whole T&C obligation stays dormant on the real clip.",
       "idempotency_key": "encounter:type_and_cross",
       "_C6": "READBACK DOUBLE-FIRE. 'type and cross' x2 (order + RN readback), 'massive transfusion' x3. The script CALLS READBACKS A FEATURE ('redundant provenance'). For a PER-UNIT charge, redundant provenance is TRIPLE BILLING. SCRIPT 1 was hardened (RECORDING_PACKET.md:270 — the Second RN says 'both lines are in', deliberately NOT 'IV access'). SCRIPT 2 WAS NOT. The idempotency_key is the fix: N utterances resolve ONE obligation, because the obligation is keyed by identity, not by utterance.",
       "requires": { "all_of": [
@@ -209,7 +213,8 @@
       "id": "OBL-PRC-CLINE-TIP",
       "subject": { "kind": "charge", "ref": "PRC-CLINE", "cpt": "36556" },
       "label": "Central line: tip position documented",
-      "trigger": { "any_of": ["central line", "central venous access", "femoral cordis", "cordis", "introducer"] },
+      "trigger": { "any_of": ["central line", "central venous access", "femoral cordis", "cordis", "introducer", "chordis"] },
+      "_stt_aliases": "'chordis' (audit wl4m5pkw3): Deepgram frequently mishears 'cordis' as 'chordis'. Idempotency_key already dedups, so no double-bill risk.",
       "idempotency_key": "encounter:central_line",
       "_C6": "'central line' (T+4:40) + 'central venous access' (readback, same beat) = TWO triggers, ONE event. Same idempotency fix.",
       "requires": { "all_of": [
@@ -227,7 +232,8 @@
       "id": "OBL-SPLINT-SITE",
       "subject": { "kind": "charge", "ref": "SPLINT", "cpt": "PENDING — SITE SELECTS THE CODE" },
       "label": "Splint: site determines the CPT",
-      "trigger": { "any_of": ["splint", "extremity splint", "splinting"] },
+      "trigger": { "any_of": ["splint", "extremity splint", "splinting", "splinted"] },
+      "_stt_aliases": "'splinted' (audit wl4m5pkw3): the femur splint is narrated past-tense ('thigh's splinted') while the team moves on; the fused token 'splinted' is missed by 'splint'/'splinting', dropping the $140 charge. Absent from the must_not_fire.",
       "🔴_wrong_cpt": "charges.json maps SPLINT -> 29105 = 'Application of long ARM splint (shoulder to hand)' — an UPPER extremity code (high confidence, AAPC). The script splints an open RIGHT FEMUR (v2 T+8:00: 'Right thigh — open femur deformity, bone visible. [Extremity splint] applied.'). Correct code is 29505 = 'Application of long LEG splint (thigh to ankle or toes)'. expected_extraction.json encodes the wrong one too: {code:SPLINT, cpt:29105, for_event:'extremity splint R femur'} — NOT EDITED (instructed).",
       "_why_not_just_a_swap": "THERE IS NO GENERIC 'EXTREMITY SPLINT' CPT. The site IS the code. So SPLINT CANNOT BE ONE ROW — it needs a site->code map with site as a requires gate. No site heard -> ambiguous -> cannot pick a code. This is the lattice shape applied to a CHARGE, not to a criterion — same walker, different rows.",
       "requires": { "all_of": [
@@ -250,7 +256,8 @@
       "id": "OBL-WOUND-CX-AXES",
       "subject": { "kind": "charge", "ref": "WOUND-CX", "cpt": "PENDING — 3 AXES SELECT THE CODE" },
       "label": "Wound repair: body area x tier x length",
-      "trigger": { "any_of": ["complex wound repair", "layered closure", "wound repair", "laceration repair"] },
+      "trigger": { "any_of": ["complex wound repair", "layered closure", "wound repair", "laceration repair", "lac repair", "deep sutures", "two layer", "closing the lac"] },
+      "_stt_aliases": "'lac repair', 'deep sutures', 'two layer', 'closing the lac' (Mike, 2026-07-18): a lac gets narrated as 'closing the scalp lac, two layer, deep sutures', never the formal 'wound repair' — fire the lac procedure when the suturing is actually heard. Wound-specific phrasings only (a line/tube 'secured with a suture' must NOT bill this), and all absent from the deferral must_not_fire, so the 'hold that for now -> unresolved' demo beat is preserved.",
       "trigger_guard": {
         "not_future_tense": true,
         "not_deferred": true,
@@ -259,7 +266,7 @@
       "🔴_wrong_cpt": "THREE problems in one row. (1) charges.json maps WOUND-CX -> 12052 = 'Repair, intermediate, wounds of FACE, ears, eyelids, nose, lips and/or mucous membranes; 2.6-5.0 cm' (high, AAPC). The charge is named 'Complex Wound Repair, SCALP'. Scalp intermediate is the 12031-12037 series. (2) The intended code is almost certainly 12032 = 'Repair, intermediate, wounds of SCALP, axillae, trunk and/or extremities; 2.6 cm to 7.5 cm' — and that 2.6-7.5 cm range is EXACTLY what trauma_callout_script_v2.md:188 cites while attributing it to 12052 (real range 2.6-5.0). The note took 12032's range and wrote 12052's number: 12032 <-> 12052 is a digit transposition. (3) The NAME says 'Complex'; 12052/12032 are INTERMEDIATE. Complex scalp repair is 13120-13122 (13121 = 2.6-7.5 cm). Name and code disagree about the TIER, and the tier is a CLINICAL determination — not mine to make. -> ADDENDUM Q4.",
       "requires": { "all_of": [
         { "id": "body_area", "affirm": ["scalp", "right parietal", "parietal", "occipital", "forehead"], "_state": "SATISFIED in v2 — 'scalp laceration to the right parietal'" },
-        { "id": "tier",      "affirm": ["layered closure", "layered", "single layer", "simple closure", "complex repair", "undermining", "debridement"], "_state": "NEVER SPOKEN -> missing" },
+        { "id": "tier",      "affirm": ["layered closure", "layered", "two layer", "deep sutures", "single layer", "simple closure", "complex repair", "undermining", "debridement"], "_state": "NEVER SPOKEN in the demo -> missing (deferred). If a real repair is narrated ('two layer, deep sutures'), tier now registers as layered/intermediate." },
         { "id": "length",    "predicate": "values.laceration_cm != null", "_state": "NEVER SPOKEN -> missing" }
       ]},
       "code_map": [
@@ -279,7 +286,8 @@
       "id": "OBL-IMG-EKG-INTERP",
       "subject": { "kind": "charge", "ref": "IMG-EKG", "cpt": "93000" },
       "label": "12-lead EKG: interpretation and report",
-      "trigger": { "any_of": ["twelve-lead", "12-lead", "twelve lead", "ekg", "ecg"] },
+      "trigger": { "any_of": ["twelve-lead", "12-lead", "twelve lead", "ekg", "ecg", "twelve leads"] },
+      "_stt_aliases": "'twelve leads' (audit wl4m5pkw3): the read-back possessive 'the twelve-lead's back' strips to the plural token 'leads', breaking the singular whole-token match. Idempotency_key dedups.",
       "trigger_guard": { "not_future_tense": true, "_C2": "'GET a twelve-lead' (order, T+6:00) vs '12-lead EKG — DONE' (performed, T+6:00 readback). Order != performed. Same idempotency key resolves both to one charge." },
       "idempotency_key": "encounter:ekg",
       "requires": { "all_of": [
