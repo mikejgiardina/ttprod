@@ -34,17 +34,38 @@ Runs on one device, no EHR integration required — a rural trauma bay still on 
 ## Repo layout
 
 ```
-Trauma-tracker/
-├── README.md          ← this file — the idea
-└── hack/              ← planning + reference material (source: ed-ambient-rcm build)
-    ├── plan/          gameplan, build spec, pitch, prep, checklists, glossary
-    ├── docs/          workflow, cadence, testing strategy, demo/intro + ADRs (docs/adr)
-    ├── reference/     obligations model, validation loops, protocols, sign-offs, datasets
-    ├── prompts/       agent prompts (extractor, accreditation, reimbursement/charge)
-    ├── fixtures/      trauma-callout scripts + expected extraction
-    └── design/        mockups + report layout
+src/
+├── engine/     deterministic recompute — ledger · walker · clocks · charges ·
+│               measures · scores · matcher (all code, no model)
+├── capture/    mic + swappable STT client · canned replay · extractor client
+├── ui/         live board · values-heard scratchpad · the single prompt surface
+├── report/     2-page print-CSS PDF (nursing sheet + RCM report), no PDF library
+├── data/       reference rulebooks — obligations · activation lattice · charges ·
+│               measures · scores (the JSON is the rulebook; the engine plays by it)
+└── types.ts    the frozen shared contract
+netlify/functions/   claude.ts (the one live model call) · stt.ts (swappable STT)
+tools/               score table-test · reference-integrity lint
+prompts/ · fixtures/ reference prompt text + the canned trauma case
 ```
 
-## Status
+## Running
 
-Early — gathering data and consolidating the plans (staged in `hack/`). Team file transfer is handled out-of-band via a shared drive. More to come.
+```
+npm install
+npm run dev            # http://localhost:5173
+```
+
+**Canned mode (default — zero keys).** Hit **Start**: the bundled trauma case replays, the
+board fills, scores worsen, the vitals-freshness prompt fires and retracts itself, charges and
+measures land, and **Generate report** prints the two pages (browser Print → *Save as PDF*).
+Append `?speed=30` to fast-forward the replay for rehearsal.
+
+**Live mode.** Copy `.env.example` → `.env` and set `ANTHROPIC_API_KEY`, `DEEPGRAM_API_KEY`,
+`STT_VENDOR=deepgram`. `npm run dev` serves the serverless functions locally — mic → `/stt`
+(Deepgram Nova-3 Medical, keyterm-biased) → transcript → `/claude` (Extractor/Scribe) → the same
+board. `File` mode uploads a clip through the identical pipeline; keys never reach the browser.
+
+**Checks.** `npm run build` · `npm run lint` · `npm run test:scores` · `npm run lint:reference`
+
+Synthetic data only. Clinical values and CPTs marked `NEEDS-CLINICIAN` / `NEEDS-CODER` are
+unsigned proposals — the engine routes around them and prints them as findings, never guesses.
