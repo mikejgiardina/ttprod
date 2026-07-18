@@ -96,6 +96,7 @@ export function recompute(input: EngineInput, config: EngineConfig = defaultConf
       values,
       nowSec,
       settleMs: config.settleMs,
+      dismissed,
       evalPredicate: (pred) =>
         evalPredicate(pred, {
           values, nowSec, resuscitationActive, obligationStates,

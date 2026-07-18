@@ -25,6 +25,8 @@ export interface WalkerCtx {
   values: ValuesState;
   nowSec: number;
   settleMs: number;
+  /** node ids the human dismissed/deferred at the prompt surface (symmetric with the ledger). */
+  dismissed?: Set<string>;
   /** evaluate a shape=predicate node (PHYS_* criteria) against the value stream. */
   evalPredicate: (pred: string) => PredResult;
 }
@@ -170,6 +172,8 @@ export function walk(lattice: ActivationLattice, base: WalkerCtx): WalkerResult 
   // ── prompt candidate selection ──
   const candidates = scored.filter((s) => {
     if (s.status !== 'ambiguous') return false;
+    // human tapped "acknowledge / not now" on this branch -> stop re-prompting it
+    if (ctx.dismissed?.has(s.node.id)) return false;
     // only nodes that carry a prompt/ask are promptable (flat presence checks are not)
     if (!s.node.prompt && !s.node.ask) return false;
     // settle: family lexicon just landed — don't interrupt a sentence
