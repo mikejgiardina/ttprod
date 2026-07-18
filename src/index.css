@@ -40,65 +40,7 @@ button,
   min-height: 44px;
 }
 
-/* ───────────────────── the 2-page report deliverable ─────────────────────
-   Print-CSS path (ADR-0001): Ctrl+P → Save as PDF, zero dependency. The pages are a
-   light printable document regardless of the app's dark theme. @page owns the margin;
-   min-height keeps page 2 from overflowing to a third sheet. */
-.report-modal {
-  max-width: 8.7in;
-  margin: 0 auto;
-  background: #55606f;
-}
-.report-root { padding: 0.4in 0; display: flex; flex-direction: column; gap: 0.3in; }
-.report-page {
-  background: #fff;
-  color: #111;
-  width: 8.5in;
-  min-height: 9.9in;
-  margin: 0 auto;
-  padding: 0.5in 0.6in;
-  box-sizing: border-box;
-  font-family: var(--font-sans);
-  font-size: 11px;
-  line-height: 1.4;
-}
-.report-page h1 { font-size: 17px; margin: 0; font-weight: 700; }
-.report-page h3 { font-size: 12px; margin: 14px 0 4px; border-bottom: 1px solid #ccc; padding-bottom: 2px; text-transform: uppercase; letter-spacing: 0.03em; color: #333; }
-.report-head { display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 2px solid #111; padding-bottom: 6px; }
-.report-head .sub, .report-page .sub { color: #666; font-size: 10px; }
-.report-head .stamp { font-size: 10px; color: #666; text-align: right; }
-.report-page table.rt { width: 100%; border-collapse: collapse; margin-top: 4px; }
-.report-page table.rt th { text-align: left; font-size: 10px; color: #555; border-bottom: 1px solid #999; padding: 2px 4px; }
-.report-page table.rt td { padding: 2px 4px; border-bottom: 1px solid #eee; vertical-align: top; }
-.report-page .mono { font-family: var(--font-mono); font-size: 10px; }
-.report-page .r { text-align: right; }
-.report-page .dim { color: #888; }
-.report-page tr.total td { font-weight: 700; border-top: 2px solid #111; border-bottom: none; }
-.report-page .cite { color: #777; font-size: 9px; font-style: italic; margin-top: 2px; }
-.report-page .chips { display: flex; flex-wrap: wrap; gap: 4px; }
-.report-page .chip { background: #f1f3f6; border: 1px solid #dde; border-radius: 4px; padding: 1px 6px; font-size: 10px; }
-.report-page .attest { margin-top: 24px; border-top: 1px dashed #999; padding-top: 8px; }
-.report-page ul.measures { list-style: none; padding: 0; margin: 4px 0; }
-.report-page ul.measures li { padding: 2px 0; }
-.report-page .badge { display: inline-block; min-width: 46px; text-align: center; font-size: 9px; text-transform: uppercase; border-radius: 3px; padding: 0 4px; margin-right: 6px; color: #fff; }
-.report-page .badge.met { background: #1a8a44; }
-.report-page .badge.open { background: #b07d10; }
-.report-page .badge.missed, .report-page .badge.unresolved { background: #b32020; }
-.report-page .badge.not_applicable { background: #888; }
-.report-page .determination { border: 1px solid #bbb; border-radius: 6px; padding: 8px 10px; margin-top: 4px; }
-.report-page .det-head { font-weight: 700; font-size: 11px; letter-spacing: 0.02em; margin-bottom: 4px; }
-.report-page .determination ul { margin: 4px 0; padding-left: 16px; }
-.report-page .det-row { margin-top: 4px; }
-.report-page .open { color: #b32020; margin-top: 4px; }
-.report-page .sign { margin-top: 10px; padding-top: 6px; border-top: 1px dashed #999; }
-.report-page .report-foot { margin-top: 18px; font-size: 9px; color: #777; text-align: center; }
-
-@media print {
-  body * { visibility: hidden; }
-  .report-modal, .report-modal * { visibility: visible; }
-  .report-modal { position: absolute; inset: 0; max-width: none; background: #fff; }
-  .no-print { display: none !important; }
-  .report-root { padding: 0; gap: 0; }
-  .report-page { box-shadow: none; page-break-after: always; }
-}
-@page { size: letter; margin: 0.4in; }
+/* The 2-page report owns its own stylesheet (src/report/print.css), imported by
+   Report.tsx. The report overlay is portaled to <body> and uses .report-overlay /
+   .report-chrome / .report-page — print.css handles both screen and @media print.
+   No report rules belong here. */
