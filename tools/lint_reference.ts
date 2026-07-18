@@ -79,7 +79,18 @@ function fires(utterance: string, phrases: string[], guard?: object): boolean {
 }
 const CHT = ['chest tube', 'tube thoracostomy', 'decompressing the left', 'decompressing the right'];
 const FALL = ['fall', 'fell', 'jumped from', 'fell from'];
-const ETCO2 = ['etco2 waveform', 'et co2', 'end-tidal co2', 'end tidal co2', 'sustained waveform'];
+// EtCO2 is the highest-stakes STT token in the build — source its variant list from the
+// SHIPPED obligation data instead of a hand-copied literal, so this test can never drift
+// from what the app actually matches. (COL-021 regression: the literal here fell behind
+// obligations.json, which already carries 'et co two' / 'co two waveform'.)
+const etco2Atom = (obligations.obligations as Array<{
+  id: string;
+  requires?: { all_of?: Array<{ id?: string; affirm?: string[] }> };
+}>)
+  .find((o) => o.id === 'OBL-AWY-ETI-CONFIRM')
+  ?.requires?.all_of?.find((a) => a.id === 'etco2');
+const ETCO2 = etco2Atom?.affirm ?? [];
+if (!ETCO2.length) bad('lexicon: OBL-AWY-ETI-CONFIRM etco2 affirm list not found — test cannot self-source');
 
 const behavioral: [string, boolean, boolean][] = [
   // [description, actual, expected]
