@@ -9,7 +9,7 @@
     "lint": "oxlint",
     "preview": "vite preview",
     "test:scores": "node --experimental-strip-types tools/test_scores.ts",
-    "lint:reference": "node tools/lint_reference.mjs"
+    "lint:reference": "node --experimental-strip-types tools/lint_reference.ts"
   },
   "dependencies": {
     "class-variance-authority": "^0.7.1",

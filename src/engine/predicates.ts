@@ -24,8 +24,9 @@ export interface EvalContext {
   latticeAnyCriterion: boolean;
 }
 
+// null reading = not yet stale (don't fire a freshness prompt before the first vitals land).
 const freshWithin = (heardAtSec: number | undefined, nowSec: number, sec: number): boolean =>
-  heardAtSec != null && nowSec - heardAtSec < sec;
+  heardAtSec == null ? true : nowSec - heardAtSec < sec;
 
 export function evalPredicate(predRaw: string, ctx: EvalContext): PredResult {
   const pred = predRaw.trim();

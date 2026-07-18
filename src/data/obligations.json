@@ -111,7 +111,7 @@
       "label": "Airway confirmation (EtCO2 + bilateral breath sounds)",
       "trigger": { "any_of": ["intubating", "tube is in", "rapid sequence", "rsi"] },
       "requires": { "all_of": [
-        { "id": "etco2",    "affirm": ["etco2 waveform", "et co2", "end-tidal co2", "end tidal co2", "end tidal waveform", "capnography", "capnography waveform", "sustained waveform"],
+        { "id": "etco2",    "affirm": ["etco2 waveform", "et co2", "et co two", "e t co2", "co two waveform", "end-tidal co2", "end tidal co2", "end tidal waveform", "end tidal", "capnography", "capnography waveform", "sustained waveform"],
           "_stt_note": "C7 — HIGHEST-STAKES TOKEN IN THE BUILD. STT mangles 'EtCO2' ('ET CO two', 'et cetera'). If it drops, AWY-ETI never releases and the flagship gate FAILS SILENTLY IN THE SAFE-LOOKING DIRECTION — a held charge reads as the gate working. Nobody catches it on stage. The variant list is the mitigation; 'end tidal' is the most survivable." },
         { "id": "bilat_bs", "affirm": ["bilateral breath sounds", "breath sounds are equal", "equal breath sounds", "breath sounds bilaterally", "equal chest expansion"] }
       ]},
