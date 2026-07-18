@@ -1,134 +1,118 @@
 /**
- * Charge engine (buildable task #8) — the module the whole "everything that touches
- * money is deterministic code" thesis rests on.
+ * Charges + activation-fee determination, derived from the obligations ledger.
  *
- *  - A charge fires only when its documentation atoms are satisfied (gating via the ledger).
- *  - TRM-ACT is split: OBL-TRM-ACT-068X (rev 0681, facility, ~$2,450) bills; OBL-TRM-ACT-G0390
- *    (professional) carries the charge-to-charge dependency G0390 → 99291 billable.
- *  - The CC-clock <30 min declines 99291 (~$325), which cascades to decline G0390.
- *  - The activation fee is PRESENTED as a determination (ADR-0014), never auto-emitted.
- *
- * Decision #7 (unreconciled in source) is config-driven via `g0390Mode` so page 2 stays
- * internally consistent whichever way it's ruled.
+ * Each charge-kind obligation is a billable line; its STATE selects the disposition
+ * (billed / held / unresolved / declined). CPT comes from the obligation's code_map
+ * (site/axis-derived) — NOT from charges.json's static cpt, which carries the three
+ * known-wrong codes (SPLINT 29105, WOUND-CX 12052, and the G0390/99291 OCE edit).
  */
 
 import type {
   ActivationDetermination,
-  ChargeItem,
   ChargeRuntime,
   ChargeStatus,
   EngineConfig,
-  Gap,
   ObligationRuntime,
   WalkerResult,
 } from '../types.ts';
+import { getCharge, getObligation } from './loader.ts';
 
-const G0390_CITATION =
-  'CMS OCE / MLN MM5438: G0390 must appear with rev code 68x on the same DOS as CPT 99291; ' +
-  'facilities providing <30 min critical care may report 68x but MAY NOT report G0390.';
-const CC_CITATION = 'CPT 99291 requires ≥30 min documented critical care.';
+const G0390_CITATION = 'CMS MLN MM5438 — OCE edit: G0390 requires CPT 99291 (≥30 min critical care) on the same DOS.';
 
-function stateToStatus(rt: ObligationRuntime): ChargeStatus {
+function gapTextFor(id: string, fallback?: string): string | undefined {
+  const def = getObligation(id) as ({ _gap_text?: string; terminal?: { gap_text?: string } }) | undefined;
+  return def?._gap_text ?? def?.terminal?.gap_text ?? fallback;
+}
+
+function statusFromState(rt: ObligationRuntime): ChargeStatus {
   switch (rt.state) {
-    case 'satisfied':
-      return 'billed';
-    case 'unresolved':
-      return rt.suppressReason === 'human_deferred' ? 'unresolved' : 'declined';
-    case 'not_applicable':
-      return 'not_applicable';
+    case 'satisfied': return 'billed';
+    case 'unresolved': return 'unresolved';
     case 'missing':
-    case 'ambiguous':
-      return 'held';
-    default:
-      return 'dormant';
+    case 'ambiguous': return 'held';
+    case 'not_applicable': return 'not_applicable';
+    default: return 'dormant';
   }
 }
 
-export interface ChargesResult {
-  charges: ChargeRuntime[];
-  estimatedTotal: number;
-  activation: ActivationDetermination;
-  gaps: Gap[];
-}
-
 export function computeCharges(
-  chargeItems: ChargeItem[],
-  obligations: ObligationRuntime[],
-  walker: WalkerResult,
+  runtimes: ObligationRuntime[],
   config: EngineConfig,
-): ChargesResult {
-  const byCode = new Map(chargeItems.map((c) => [c.code, c]));
-  const oblById = new Map(obligations.map((o) => [o.id, o]));
+): { charges: ChargeRuntime[]; estimatedTotal: number } {
   const charges: ChargeRuntime[] = [];
 
-  for (const rt of obligations) {
+  for (const rt of runtimes) {
     if (rt.subject.kind !== 'charge') continue;
     if (rt.state === 'dormant') continue;
 
-    const code = String(rt.subject.ref ?? '');
-    const base = byCode.get(code);
-    let price = base?.price ?? 0;
-    let name = base?.name ?? rt.label;
-    let status = stateToStatus(rt);
+    const code = rt.subject.ref ?? rt.id;
+    const base = code ? getCharge(code) : undefined;
+    const isG0390 = rt.subject.hcpcs === 'G0390';
+
+    let status = statusFromState(rt);
     let reason: string | undefined;
     let citation: string | undefined;
-    const cpt = rt.cptSelected ?? base?.cpt ?? null;
+    let price = rt.dollarImpact ?? base?.price ?? 0;
+    let cpt = rt.cptSelected ?? (rt.subject.hcpcs ?? null);
 
-    // TRM-ACT split
-    if (rt.id === 'OBL-TRM-ACT-068X') {
-      name = 'Trauma team activation — rev 0681 (facility)';
-      // rev 0681 bills when criteria+documented+team+prehospital are met
-    } else if (rt.id === 'OBL-TRM-ACT-G0390') {
-      name = 'Trauma activation w/ critical care — G0390 (professional)';
+    if (isG0390 && rt.state !== 'satisfied') {
+      // the headline finding: activation reports rev 0681, but the G0390 HCPCS is declined.
+      status = config.g0390Mode === 'decline_with_citation' ? 'declined' : 'unresolved';
+      reason = gapTextFor(rt.id, 'G0390 not billed — requires ≥30 min critical care (CPT 99291).');
+      citation = G0390_CITATION;
       price = 0;
-      if (config.g0390Mode === 'decline_with_citation') {
-        status = 'declined';
-        reason = 'Requires 99291 (≥30 min critical care), which was not billable.';
-        citation = G0390_CITATION;
-      } else {
-        status = 'unresolved';
-        reason = 'Activation presented as one unattributed determination (ADR-0014); G0390 neither emitted nor declined.';
-      }
-    } else if (rt.id === 'OBL-CC-TIME-30MIN' && (status === 'declined' || status === 'unresolved')) {
-      reason = 'Critical care <30 min documented in-bay; time likely continued in the OR — reconcile.';
-      citation = CC_CITATION;
-      status = 'declined';
+      cpt = 'G0390';
+    } else if (status === 'unresolved') {
+      reason = gapTextFor(rt.id);
     }
 
-    if ((status === 'declined' || status === 'unresolved') && rt.terminal?.gap_text) {
-      reason = reason ?? rt.terminal.gap_text;
-    }
-
-    charges.push({ code, name, cpt, price, status, obligationId: rt.id, reason, citation });
+    charges.push({
+      code: isG0390 ? 'TRM-ACT-G0390' : code,
+      name: isG0390 ? 'Trauma activation, critical-care-associated (G0390)' : (base?.name ?? rt.label),
+      cpt,
+      price,
+      status,
+      obligationId: rt.id,
+      reason,
+      citation,
+    });
   }
 
   const estimatedTotal = charges
     .filter((c) => c.status === 'billed')
     .reduce((sum, c) => sum + c.price, 0);
 
-  // ── activation determination (present, don't emit) ──
-  const trm = oblById.get('OBL-TRM-ACT-068X');
-  const atomSat = (id: string): boolean => !!trm?.atoms.find((a) => a.id === id)?.satisfied;
-  const activationDocumented = atomSat('documented');
-  const teamResponded = atomSat('team_responded');
-  const prehospitalNotification = atomSat('prehospital_notification');
-  const qualifies = trm?.state === 'satisfied';
+  return { charges, estimatedTotal };
+}
+
+export function computeActivation(
+  runtimes: ObligationRuntime[],
+  walker: WalkerResult,
+  config: EngineConfig,
+): ActivationDetermination {
+  const act = runtimes.find((r) => r.id === 'OBL-TRM-ACT-068X');
+  const atom = (id: string) => act?.atoms.find((a) => a.id === id)?.satisfied ?? false;
+
+  const activationDocumented = atom('documented');
+  const teamResponded = atom('team_responded');
+  const prehospitalNotification = atom('prehospital_notification');
+  const qualifies = walker.anyCriterionSatisfied && activationDocumented;
 
   const openConditions: string[] = [];
-  if (!walker.anyCriterionSatisfied) openConditions.push('No activation criterion satisfied yet');
+  if (!walker.anyCriterionSatisfied) openConditions.push('No activation criterion satisfied');
   if (!activationDocumented) openConditions.push('Activation not documented');
   if (!teamResponded) openConditions.push('Team response not captured');
   if (!prehospitalNotification) openConditions.push('Prehospital notification / inter-hospital transfer not captured');
 
-  const g0390 = oblById.get('OBL-TRM-ACT-G0390');
-  const feeDisposition =
-    (qualifies ? 'rev 0681 reports (activation qualifies). ' : 'Activation determination pending. ') +
-    (config.g0390Mode === 'decline_with_citation'
-      ? 'G0390 not billed — critical care <30 min (99291).'
-      : 'G0390 unattributed pending reconciliation (ADR-0014).') +
-    (g0390 ? '' : '');
+  const g0390 = runtimes.find((r) => r.subject.hcpcs === 'G0390');
+  const g0390Billed = g0390?.state === 'satisfied';
+  const feeDisposition = g0390Billed
+    ? 'Rev 0681 reports; G0390 billed (critical care ≥30 min documented).'
+    : config.g0390Mode === 'decline_with_citation'
+      ? 'Rev 0681 reports; G0390 not billed — critical care < 30 min (CPT 99291 not met). ' + G0390_CITATION
+      : 'Activation shown as one unattributed determination pending critical-care reconciliation.';
 
-  const activation: ActivationDetermination = {
+  return {
     qualifies,
     criteriaMet: walker.criteriaMet.map((c) => ({ category: c.category, criterion: c.criterion, evidence: c.evidence })),
     activationDocumented,
@@ -137,16 +121,4 @@ export function computeCharges(
     openConditions,
     feeDisposition,
   };
-
-  // ── gaps: unresolved terminal obligations render as page-2 gaps ──
-  const gaps: Gap[] = obligations
-    .filter((o) => o.state === 'unresolved')
-    .map((o) => ({
-      obligationId: o.id,
-      label: o.label,
-      text: o.terminal?.gap_text ?? `${o.label}: open and unresolved at disposition.`,
-      dollarImpact: o.dollarImpact,
-    }));
-
-  return { charges, estimatedTotal, activation, gaps };
 }

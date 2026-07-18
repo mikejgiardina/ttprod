@@ -1,208 +1,237 @@
 /**
- * Obligations ledger (buildable task #5) — the deterministic heart.
+ * The obligations ledger.
  *
- * 6 states (dormant/satisfied/missing/ambiguous/not_applicable/unresolved), two-armed
- * materiality (qualification OR documentation; NO safety arm), and the render predicate:
+ * One ObligationRuntime per catalog row. A prompt is nothing but an open, material,
+ * un-suppressed obligation rendered — computed here, never scheduled. Clocks only
+ * flip material(); they never render (BUILD_SPEC / OBLIGATIONS_MODEL).
  *
- *   render(o) ⇔ o.state ∈ {missing, ambiguous} ∧ material(o) ∧ ¬suppressed(o)
- *
- * Recompute from the FULL evidence set every call, BEFORE any renderer runs — so a prompt
- * is a pure render of state and retracts itself the instant the room answers. Clocks only
- * flip material(); they never create a prompt. `satisfied` is not a one-way latch.
- *
- * NEEDS-CODER / NEEDS-CLINICIAN predicate atoms evaluate to 'unknown' and are treated as
- * non-gating-but-flagged here (never as reviewed truth).
+ * render(o) <=> state in {missing, ambiguous} AND material(o) AND NOT suppressed(o)
  */
 
 import type {
   Atom,
-  EngineConfig,
-  ObligationCatalog,
   ObligationDef,
   ObligationRuntime,
   ObligationState,
   Requires,
+  ValuesState,
 } from '../types.ts';
 import type { Corpus } from './matcher.ts';
-import { anyPresent, deferralSpokenFor, firstMatch } from './matcher.ts';
+import type { ClockState } from './clocks.ts';
+import { deferralSpokenFor, firstMatch } from './matcher.ts';
+import { deadlineElapsed } from './clocks.ts';
 import { evalPredicate, type EvalContext } from './predicates.ts';
-import type { ClocksState } from './clocks.ts';
 
-const FACILITY_DESIGNATIONS = ['state_designated', 'locally_designated', 'ACS_verified'];
+export interface LedgerCtx {
+  corpus: Corpus;
+  values: ValuesState;
+  clocks: ClockState;
+  nowSec: number;
+  resuscitationActive: boolean;
+  latticeAnyCriterion: boolean;
+  /** state of every obligation from the previous fixpoint pass (for cross-refs). */
+  obligationStates: Record<string, ObligationState>;
+  /** obligations the human has dismissed/deferred at the prompt surface. */
+  dismissed: Set<string>;
+  settleMs: number;
+}
 
 interface AtomEval {
   id: string;
   satisfied: boolean;
-  flagged: boolean;
+  flagged: boolean; // predicate returned 'unknown' (NEEDS-CODER/CLINICIAN) — counts as satisfied-but-flagged
+  source?: string;
 }
 
-function evalAtom(atom: Atom, ctx: EvalContext, corpus: Corpus): AtomEval {
-  const affirmHit = anyPresent(corpus, atom.affirm);
-  const predRes = atom.predicate ? evalPredicate(atom.predicate, ctx) : undefined;
-  const satisfied = affirmHit || predRes === true || predRes === 'unknown';
-  return { id: atom.id, satisfied, flagged: predRes === 'unknown' };
+function predCtx(c: LedgerCtx): EvalContext {
+  return {
+    values: c.values,
+    nowSec: c.nowSec,
+    resuscitationActive: c.resuscitationActive,
+    obligationStates: c.obligationStates,
+    criticalCareAccruedMin: c.clocks.criticalCareAccruedMin,
+    latticeAnyCriterion: c.latticeAnyCriterion,
+  };
 }
 
-function evalRequires(
-  requires: Requires,
-  ctx: EvalContext,
-  corpus: Corpus,
-): { atoms: AtomEval[]; state: ObligationState } {
-  const list = requires.all_of ?? requires.any_of ?? [];
-  const atoms = list.map((a) => evalAtom(a, ctx, corpus));
-  if (!atoms.length) return { atoms, state: 'satisfied' };
-  const nSat = atoms.filter((a) => a.satisfied).length;
-  const min = requires.all_of ? list.length : (requires.min_satisfied ?? 1);
-  let state: ObligationState;
-  if (nSat >= min) state = 'satisfied';
-  else if (nSat > 0) state = 'ambiguous';
-  else state = 'missing';
-  return { atoms, state };
+/** the rulebook flags some sub-atoms as documentation-only ("may not be spoken aloud"). */
+function isNonGating(atom: Atom): boolean {
+  const note = String((atom as { _note?: unknown })._note ?? '');
+  return /may not be spoken|informational|likely unresolved/i.test(note);
 }
 
-function pickCpt(def: ObligationDef, ctx: EvalContext): string | null {
-  if (!def.code_map) return (def.subject.cpt as string) ?? null;
-  // SPLINT: site selects the code
-  if (def.id === 'OBL-SPLINT-SITE') {
-    const site = ctx.values.splint_site;
-    if (!site) return null;
-    for (const row of def.code_map) {
-      const m = /site in \[([^\]]+)\]/.exec(row.when);
-      if (!m) continue;
-      const sites = m[1].split(',').map((s) => s.trim().replace(/'/g, ''));
-      if (sites.includes(site)) return row.cpt;
-    }
+/** an atom is satisfied if its affirm lexicon is present OR its predicate holds (unknown = flagged-satisfied). */
+function evalAtom(atom: Atom, c: LedgerCtx): AtomEval {
+  const affirmHit = atom.affirm?.length ? firstMatch(c.corpus, atom.affirm) : null;
+  if (affirmHit) return { id: atom.id, satisfied: true, flagged: false, source: affirmHit.raw };
+  if (atom.predicate) {
+    const r = evalPredicate(atom.predicate, predCtx(c));
+    if (r === 'unknown') return { id: atom.id, satisfied: true, flagged: true };
+    if (r === true) return { id: atom.id, satisfied: true, flagged: false };
+    if (isNonGating(atom)) return { id: atom.id, satisfied: true, flagged: true };
+    return { id: atom.id, satisfied: false, flagged: false };
+  }
+  // affirm-only atom the rulebook marks as documentation-only: non-gating but flagged
+  if (isNonGating(atom)) return { id: atom.id, satisfied: true, flagged: true };
+  return { id: atom.id, satisfied: false, flagged: false };
+}
+
+function evalRequires(req: Requires, c: LedgerCtx): { atoms: AtomEval[]; satisfiedCount: number; total: number; met: boolean } {
+  if (req.all_of) {
+    const atoms = req.all_of.map((a) => evalAtom(a, c));
+    const satisfiedCount = atoms.filter((a) => a.satisfied).length;
+    return { atoms, satisfiedCount, total: atoms.length, met: satisfiedCount === atoms.length };
+  }
+  if (req.any_of) {
+    const atoms = req.any_of.map((a) => evalAtom(a, c));
+    const satisfiedCount = atoms.filter((a) => a.satisfied).length;
+    const min = req.min_satisfied ?? 1;
+    return { atoms, satisfiedCount, total: atoms.length, met: satisfiedCount >= min };
+  }
+  return { atoms: [], satisfiedCount: 0, total: 0, met: true };
+}
+
+/** trigger + trigger_guard → { triggered, atSec }. */
+function evalTrigger(def: ObligationDef, c: LedgerCtx): { triggered: boolean; atSec: number | null } {
+  const t = def.trigger;
+  if (t.any_of) {
+    const hit = firstMatch(c.corpus, t.any_of, def.trigger_guard);
+    return { triggered: !!hit, atSec: hit?.atSec ?? null };
+  }
+  if (t.predicate) {
+    const r = evalPredicate(t.predicate, predCtx(c));
+    // resuscitation_active === true is the common value-stream trigger
+    return { triggered: r === true, atSec: c.clocks.activationAtSec };
+  }
+  if (t.ref && t.when) {
+    return {
+      triggered: c.obligationStates[t.ref] === (t.when as ObligationState),
+      atSec: c.clocks.activationAtSec,
+    };
+  }
+  return { triggered: false, atSec: null };
+}
+
+/** materiality, gated by any clock the obligation declares (staleness / deadline). */
+function isMaterial(def: ObligationDef, state: ObligationState, c: LedgerCtx): boolean {
+  const arms = def.material_for ?? [];
+  if (arms.length === 0) return false; // e.g. OBL-REG-DEMOGRAPHICS: charts + reports, never prompts
+  if (state === 'satisfied' || state === 'not_applicable' || state === 'dormant') return false;
+
+  const reRaise = (def as { re_raise?: { on?: string[]; deadline_min?: number } }).re_raise;
+  const on = reRaise?.on ?? [];
+  if (on.includes('staleness')) return c.clocks.vitalsStale; // clock flips materiality
+  if (on.includes('deadline')) {
+    const min = reRaise?.deadline_min ?? 10;
+    return deadlineElapsed(c.clocks.activationAtSec, min, c.nowSec);
+  }
+  return true;
+}
+
+/** pick the prompt text, narrowing to the half that is actually absent (AWY-ETI). */
+function promptFor(def: ObligationDef, atoms: AtomEval[], state: ObligationState): string | undefined {
+  if (state !== 'missing' && state !== 'ambiguous') return undefined;
+  if (def.id === 'OBL-AWY-ETI-CONFIRM' && state === 'ambiguous') {
+    const etco2 = atoms.find((a) => a.id === 'etco2')?.satisfied;
+    const bs = atoms.find((a) => a.id === 'bilat_bs')?.satisfied;
+    if (etco2 && !bs) return def.prompt_partial_bs;
+    if (bs && !etco2) return def.prompt_partial_etco2;
+  }
+  return def.prompt;
+}
+
+/** evaluate a code_map `when` string against the value stream (targeted, not eval()). */
+function matchCodeMapWhen(when: string, values: ValuesState): boolean {
+  // splint / penetrating: "site in ['thigh','femur',...]"
+  const inMatch = /site in \[([^\]]*)\]/.exec(when);
+  if (inMatch) {
+    const list = inMatch[1].split(',').map((s) => s.replace(/['"\s]/g, ''));
+    return values.splint_site != null && list.includes(values.splint_site);
+  }
+  // EKG default: needs a tracing AND an interpretation — 93000 global
+  if (/tracing AND interpretation/.test(when)) return true;
+  // wound axes require tier + length that are never spoken -> unresolvable
+  if (/tier=|length/.test(when)) return false;
+  return false;
+}
+
+function selectCpt(def: ObligationDef, state: ObligationState, values: ValuesState): string | null {
+  if (def.code_map?.length) {
+    if (state !== 'satisfied') return null; // can't pick a code until the gate resolves
+    for (const row of def.code_map) if (matchCodeMapWhen(row.when, values)) return row.cpt;
     return null;
   }
-  // EKG: global tracing+interpretation → 93000
-  if (def.id === 'OBL-IMG-EKG-INTERP') return '93000';
-  // WOUND-CX: needs tier + length (both unknown in the demo) → cannot select
-  return null;
+  const cpt = def.subject.cpt;
+  if (!cpt || /PENDING|NEEDS/i.test(cpt)) return null;
+  return cpt;
 }
 
-export interface LedgerResult {
-  runtimes: ObligationRuntime[];
-  states: Record<string, ObligationState>;
+function dollarImpact(def: ObligationDef): number | undefined {
+  return def.terminal?.dollar_impact;
 }
 
-export function computeObligations(
-  catalog: ObligationCatalog,
-  corpus: Corpus,
-  ctx: EvalContext,
-  clocks: ClocksState,
-  config: EngineConfig,
-  nowSec: number,
-): LedgerResult {
-  const runtimes: ObligationRuntime[] = [];
-  const states: Record<string, ObligationState> = {};
+export function evalObligation(def: ObligationDef, c: LedgerCtx): ObligationRuntime {
+  const { triggered, atSec } = evalTrigger(def, c);
 
-  for (const def of catalog.obligations) {
-    // ── trigger ──
-    let triggered = false;
-    let triggeredAtSec: number | null = null;
-    if (def.trigger.any_of) {
-      const hit = firstMatch(corpus, def.trigger.any_of, def.trigger_guard);
-      triggered = !!hit;
-      triggeredAtSec = hit?.atSec ?? null;
-    } else if (def.trigger.predicate) {
-      triggered = evalPredicate(def.trigger.predicate, ctx) === true;
-      triggeredAtSec = triggered ? 0 : null;
-    } else if (def.trigger.ref) {
-      const want = def.trigger.when ?? 'satisfied';
-      triggered = ctx.obligationStates[def.trigger.ref] === want;
-      triggeredAtSec = triggered ? 0 : null;
-    }
-
-    if (!triggered) {
-      const rt: ObligationRuntime = {
-        id: def.id,
-        label: def.label,
-        subject: def.subject,
-        state: 'dormant',
-        triggered: false,
-        triggeredAtSec: null,
-        atoms: [],
-        materialArms: [],
-        material: false,
-        suppressed: false,
-        render: false,
-        cptSelected: pickCpt(def, ctx),
-        dollarImpact: def.terminal?.dollar_impact,
-        terminal: def.terminal,
-      };
-      runtimes.push(rt);
-      states[def.id] = 'dormant';
-      continue;
-    }
-
-    // ── requires ──
-    const { atoms, state: reqState } = evalRequires(def.requires, ctx, corpus);
-    let state: ObligationState = reqState;
-
-    // facility precondition (TRM-ACT rev 068x): a designated-center config constant
-    if (def.facility_precondition && !FACILITY_DESIGNATIONS.includes(config.facilityTraumaDesignation)) {
-      state = 'not_applicable';
-    }
-
-    // ── materiality (two arms; clocks gate the deadline obligation) ──
-    const arms = [...def.material_for];
-    if (def.id === 'OBL-EFAST-DEADLINE' && !clocks.efastDeadlineElapsed) arms.length = 0;
-    const material = arms.length > 0 && (state === 'missing' || state === 'ambiguous');
-
-    // ── suppression ──
-    let suppressed = false;
-    let suppressReason: string | undefined;
-    const humanDeferred = deferralSpokenFor(corpus, def.trigger.any_of);
-    if (humanDeferred) {
-      suppressed = true;
-      suppressReason = 'human_deferred';
-    } else if (triggeredAtSec != null && nowSec - triggeredAtSec < config.settleMs / 1000) {
-      suppressed = true;
-      suppressReason = 'settling';
-    }
-
-    // disposition sweep: open + material at disposition → unresolved (terminal)
-    if (nowSec >= config.dispositionSec && (state === 'missing' || state === 'ambiguous') && arms.length > 0) {
-      state = def.terminal?.if_open ?? 'unresolved';
-    }
-
-    const render = (state === 'missing' || state === 'ambiguous') && material && !suppressed;
-
-    // ── prompt text (AWY partials narrow to the half actually absent) ──
-    let promptText: string | undefined;
-    if (render) {
-      if (def.id === 'OBL-AWY-ETI-CONFIRM') {
-        const etco2 = atoms.find((a) => a.id === 'etco2')?.satisfied;
-        const bs = atoms.find((a) => a.id === 'bilat_bs')?.satisfied;
-        if (etco2 && !bs) promptText = def.prompt_partial_etco2;
-        else if (bs && !etco2) promptText = def.prompt_partial_bs;
-        else promptText = def.prompt;
-      } else {
-        promptText = def.prompt ?? (def['prompt'] as string | undefined);
-      }
-    }
-
-    const rt: ObligationRuntime = {
+  if (!triggered) {
+    return {
       id: def.id,
       label: def.label,
       subject: def.subject,
-      state,
-      triggered: true,
-      triggeredAtSec,
-      atoms: atoms.map((a) => ({ id: a.id, satisfied: a.satisfied, source: a.flagged ? 'flagged:pending-review' : undefined })),
-      materialArms: arms,
-      material,
-      suppressed,
-      suppressReason,
-      render,
-      promptText,
-      cptSelected: pickCpt(def, ctx),
-      dollarImpact: def.terminal?.dollar_impact,
-      terminal: def.terminal,
+      state: 'dormant',
+      triggered: false,
+      triggeredAtSec: null,
+      atoms: [],
+      materialArms: def.material_for ?? [],
+      material: false,
+      suppressed: false,
+      render: false,
+      cptSelected: null,
     };
-    runtimes.push(rt);
-    states[def.id] = state;
   }
 
-  return { runtimes, states };
+  const { atoms, satisfiedCount, met } = evalRequires(def.requires, c);
+
+  let state: ObligationState;
+  if (met) state = 'satisfied';
+  else if (satisfiedCount === 0) state = 'missing';
+  else state = 'ambiguous';
+
+  // human said "hold that / not now" about this obligation's trigger -> respect the decline
+  const trigPhrases = def.trigger.any_of ?? [];
+  const humanDeferred = c.dismissed.has(def.id) || deferralSpokenFor(c.corpus, trigPhrases);
+
+  const material = isMaterial(def, state, c);
+
+  // settle: don't render a prompt for an obligation whose trigger fired < settle_ms ago
+  const settleActive = atSec != null && c.nowSec - atSec < c.settleMs / 1000;
+
+  const promptText = promptFor(def, atoms, state);
+  const suppressed = humanDeferred || settleActive || !promptText;
+  const render = (state === 'missing' || state === 'ambiguous') && material && !suppressed;
+
+  const cptSelected = selectCpt(def, state, c.values);
+
+  return {
+    id: def.id,
+    label: def.label,
+    subject: def.subject,
+    state,
+    triggered: true,
+    triggeredAtSec: atSec,
+    atoms: atoms.map((a) => ({ id: a.id, satisfied: a.satisfied, source: a.source })),
+    materialArms: def.material_for ?? [],
+    material,
+    suppressed,
+    suppressReason: humanDeferred ? 'human_deferred' : settleActive ? 'settle' : undefined,
+    render,
+    promptText: render ? promptText : undefined,
+    cptSelected,
+    dollarImpact: dollarImpact(def),
+    terminal: def.terminal,
+  };
+}
+
+export function evalLedger(defs: ObligationDef[], c: LedgerCtx): ObligationRuntime[] {
+  return defs.map((d) => evalObligation(d, c));
 }

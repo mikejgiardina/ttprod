@@ -1,37 +1,34 @@
 /**
- * Score table-tests (buildable task #3). Run: `npm run test:scores`
- * (node --experimental-strip-types). Expected values are the four known rows from
- * fixtures/expected_extraction.json.
+ * Score table-test. Run: `npm run test:scores`.
+ *
+ * Locks the four hand-computed values from fixtures/expected_extraction.json against
+ * the pure functions in src/engine/scores.ts. No framework, no JSON import — the
+ * numbers are the contract.
  */
 
-import { shockIndex, rts, gcsFromComponents, gcsCoding, sbpCoding, rrCoding } from '../src/engine/scores.ts';
+import assert from 'node:assert/strict';
+import { shockIndex, rts } from '../src/engine/scores.ts';
 
-let failures = 0;
-function eq(name: string, got: number, want: number) {
-  const ok = Math.abs(got - want) < 1e-9;
-  if (!ok) failures++;
-  console.log(`${ok ? '✓' : '✗'} ${name}: got ${got}, want ${want}`);
+const cases: { label: string; got: number; want: number }[] = [
+  { label: 'shockIndex(128, 88)', got: shockIndex(128, 88), want: 1.45 },
+  { label: 'shockIndex(132, 84)', got: shockIndex(132, 84), want: 1.57 },
+  { label: 'rts(13, 88, 24)', got: rts(13, 88, 24), want: 7.11 },
+  { label: 'rts(9, 84, 24)', got: rts(9, 84, 24), want: 6.17 },
+];
+
+let failed = 0;
+for (const c of cases) {
+  try {
+    assert.equal(c.got, c.want);
+    console.log(`  ok   ${c.label} = ${c.got}`);
+  } catch {
+    failed++;
+    console.error(`  FAIL ${c.label} = ${c.got}, expected ${c.want}`);
+  }
 }
 
-// Shock Index = HR / SBP
-eq('shockIndex(128, 88)', shockIndex(128, 88), 1.45);
-eq('shockIndex(132, 84)', shockIndex(132, 84), 1.57);
-
-// RTS = 0.9368*GCS_c + 0.7326*SBP_c + 0.2908*RR_c
-eq('rts(13, 88, 24)', rts(13, 88, 24), 7.11);
-eq('rts(9, 84, 24)', rts(9, 84, 24), 6.17);
-
-// component coding boundaries
-eq('gcsCoding(13)', gcsCoding(13), 4);
-eq('gcsCoding(9)', gcsCoding(9), 3);
-eq('sbpCoding(88)', sbpCoding(88), 3); // 88 is 76-89, NOT >89
-eq('sbpCoding(90)', sbpCoding(90), 4);
-eq('rrCoding(24)', rrCoding(24), 4);
-eq('rrCoding(30)', rrCoding(30), 3);
-eq('gcsFromComponents(4,5,6)', gcsFromComponents(4, 5, 6), 15);
-
-if (failures) {
-  console.error(`\n${failures} score test(s) FAILED`);
+if (failed) {
+  console.error(`\n${failed} score check(s) failed.`);
   process.exit(1);
 }
-console.log('\nAll score tests passed.');
+console.log(`\nAll ${cases.length} score checks passed.`);

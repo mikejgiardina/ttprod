@@ -1,189 +1,206 @@
 /**
- * Activation-criteria lattice walker (buildable task #6).
+ * The activation-criteria lattice walker (activation_lattice.json → walker.steps).
  *
- * The 8-step walk from src/data/activation_lattice.json → walker.steps:
- *   enter → prune resolved → prune excluded → prune blocked → prune immaterial
- *   → rank by info_gain desc then id → render exactly ONE → loop on new evidence.
+ * enter → prune (resolved · excluded · blocked/locked · immaterial) → rank by
+ * info_gain → render exactly ONE. The tap-tap-tap cascade is emergent: this runs
+ * fresh on every recompute, so a prompt retracts itself the instant the room answers.
  *
- * Three "never" guards for an orphan number: don't infer a family, don't let a bare
- * number satisfy a criterion, don't default to fall. Plus the two-armed materiality with
- * the subline-precedence rule (ADR-0010): the renderer picks the qualification subline
- * when that arm is live, else the documentation subline.
- *
- * Physiologic criteria are pure predicates (never walked, never prompted). Anatomic-flat
- * criteria are presence checks (never prompted). Only lattice mechanism nodes can prompt.
+ * A prompt is a pure render of state, never an event (hard_invariant).
  */
 
 import type {
   ActivationLattice,
   LatticeFamily,
+  LatticeModifier,
   LatticeNode,
+  ValuesState,
   WalkerResult,
 } from '../types.ts';
 import type { Corpus } from './matcher.ts';
+import type { PredResult } from './predicates.ts';
 import { anyPresent, contains, firstMatch } from './matcher.ts';
-import { evalPredicate, type EvalContext } from './predicates.ts';
 
-type NodeResolution = 'met' | 'negative' | 'ambiguous' | 'blocked' | 'inactive';
+export interface WalkerCtx {
+  corpus: Corpus;
+  values: ValuesState;
+  nowSec: number;
+  settleMs: number;
+  /** evaluate a shape=predicate node (PHYS_* criteria) against the value stream. */
+  evalPredicate: (pred: string) => PredResult;
+}
 
-const WORD_NUM: Record<string, number> = {
-  ten: 10, fifteen: 15, twenty: 20, twentyfive: 25, thirty: 30, thirtyfive: 35,
-  forty: 40, fifty: 50, sixty: 60,
-};
+// structural extension so evalNode can reach sibling families for delegation.
+type CtxWithLattice = WalkerCtx & { _lattice: ActivationLattice };
 
-function parseDistanceFt(corpus: Corpus): number | null {
+type NodeStatus = 'met' | 'not_met' | 'ambiguous' | 'dormant';
+
+/** a lexicon hit that is not scoped-out by an enter_guard negation. */
+function enteredUnnegated(corpus: Corpus, phrases: string[]): boolean {
+  // enter_guard.not_preceded_by_negation: the phrase must appear NOT negated.
+  return firstMatch(corpus, phrases, { not_negated: true }) !== null;
+}
+
+function familyEntered(corpus: Corpus, fam: LatticeFamily): boolean {
+  if (fam.enter_when.always) return true;
+  const phrases = fam.enter_when.any_of ?? [];
+  if (fam.enter_guard?.not_preceded_by_negation) return enteredUnnegated(corpus, phrases);
+  return anyPresent(corpus, phrases);
+}
+
+function earliestPhraseSec(corpus: Corpus, phrases: string[]): number | null {
+  const hit = firstMatch(corpus, phrases);
+  return hit ? hit.atSec : null;
+}
+
+/** distance in feet spoken anywhere in the corpus ("twenty feet", "20 ft"), or null. */
+function parseDistanceFt(corpus: Corpus): { ft: number; raw: string } | null {
+  const words: Record<string, number> = {
+    ten: 10, fifteen: 15, twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60,
+  };
   for (const l of corpus.lines) {
-    const d = /(\d+)\s*(?:feet|foot|ft)\b/.exec(l.norm);
-    if (d) return parseInt(d[1], 10);
-    const w = /(ten|fifteen|twenty ?five|twenty|thirty ?five|thirty|forty|fifty|sixty)\s*(?:feet|foot|ft)\b/.exec(l.norm);
-    if (w) return WORD_NUM[w[1].replace(' ', '')] ?? null;
+    const num = /(\d+)\s*(?:ft|feet|foot)\b/.exec(l.norm);
+    if (num) return { ft: parseInt(num[1], 10), raw: `${num[1]} feet` };
+    for (const [w, v] of Object.entries(words)) {
+      if (new RegExp(`\\b${w}\\s+(?:ft|feet|foot)\\b`).test(l.norm)) return { ft: v, raw: `${w} feet` };
+    }
   }
   return null;
 }
 
-function parseFrom(corpus: Corpus, words: string[]): string | null {
+/** first categorical site word from a value list present in the corpus. */
+function firstSite(corpus: Corpus, sites: string[]): string | null {
   for (const l of corpus.lines) {
-    for (const w of words) if (contains(l.norm, w)) return w;
+    for (const s of sites) if (contains(l.norm, s)) return s;
   }
   return null;
 }
 
-export function computeWalker(
-  lattice: ActivationLattice,
-  corpus: Corpus,
-  ctx: EvalContext,
-): WalkerResult {
-  // ── step 1: ENTER (with enter_guard.not_preceded_by_negation) ──
-  const enteredAt = new Map<string, number>();
-  for (const fam of lattice.families) {
-    if (fam.enter_when.always) {
-      enteredAt.set(fam.id, -1);
-      continue;
-    }
-    const guard = fam.enter_guard?.not_preceded_by_negation ? { not_negated: true } : undefined;
-    const hit = firstMatch(corpus, fam.enter_when.any_of, guard);
-    if (hit) enteredAt.set(fam.id, hit.atSec);
+/** resolve a modifier-driven node (FALL_HEIGHT distance, PEN_SITE site). */
+function evalModifierNode(node: LatticeNode, fam: LatticeFamily, ctx: WalkerCtx): NodeStatus {
+  const mod: LatticeModifier | undefined = node.resolved_by_modifier
+    ? fam.modifiers?.[node.resolved_by_modifier]
+    : undefined;
+  if (!mod) return 'ambiguous';
+
+  if (node.resolved_by_modifier === 'distance') {
+    const d = parseDistanceFt(ctx.corpus);
+    if (d == null) return 'ambiguous';
+    const thr = mod.threshold ?? 20;
+    return d.ft > thr ? 'met' : 'not_met';
   }
-
-  // ── step 3 (pre): resolve mutual exclusions — earliest-entered mechanism wins ──
-  for (const fam of lattice.families) {
-    if (!enteredAt.has(fam.id) || !fam.excludes_families) continue;
-    const mine = enteredAt.get(fam.id)!;
-    for (const other of fam.excludes_families) {
-      if (!enteredAt.has(other)) continue;
-      const theirs = enteredAt.get(other)!;
-      // drop the later one; ties drop the excluded family
-      if (theirs >= mine) enteredAt.delete(other);
-    }
-  }
-  const entered = lattice.families.filter((f) => enteredAt.has(f.id));
-
-  // ── resolve every node in entered families ──
-  const resolutions = new Map<string, { node: LatticeNode; family: LatticeFamily; res: NodeResolution }>();
-
-  const resolveNode = (node: LatticeNode, fam: LatticeFamily): NodeResolution => {
-    // physiologic: pure predicate, never prompted
-    if (fam.shape === 'predicate' && node.predicate) {
-      const r = evalPredicate(node.predicate, ctx);
-      return r === true ? 'met' : 'inactive'; // unknown/false → inactive (never fabricate)
-    }
-    // anatomic flat / stub: presence check, never prompted
-    if (fam.shape === 'flat' || node.shape === 'lattice_stub') {
-      if (node.affirm && anyPresent(corpus, node.affirm)) return 'met';
-      if (node.negate && anyPresent(corpus, node.negate)) return 'negative';
-      return 'inactive';
-    }
-    // delegated (ANAT_PENETRATING → PEN_SITE) handled by the PEN family itself
-    if (node.shape === 'delegated') return 'inactive';
-
-    // lattice mechanism node
-    if (node.resolved_by_modifier === 'distance') {
-      const modifier = fam.modifiers?.distance;
-      if (!modifier || modifier.role !== 'qualifier') return 'inactive'; // irrelevant under MVC
-      const dist = parseDistanceFt(corpus);
-      if (dist == null) return 'ambiguous';
-      const thr = modifier.threshold ?? 20;
-      return dist > thr ? 'met' : 'negative';
-    }
-    if (node.resolved_by_modifier === 'site') {
-      const modifier = fam.modifiers?.site;
-      const site = parseFrom(corpus, [...(modifier?.qualifying ?? []), ...(modifier?.non_qualifying ?? [])]);
-      if (!site) return 'ambiguous';
-      return (modifier?.qualifying ?? []).includes(site) ? 'met' : 'negative';
-    }
-    // affirm/negate lexicon node
-    if (node.negate && anyPresent(corpus, node.negate)) return 'negative';
-    if (node.affirm && anyPresent(corpus, node.affirm)) return 'met';
+  if (node.resolved_by_modifier === 'site') {
+    const site = firstSite(ctx.corpus, mod.qualifying ?? []);
+    if (site) return 'met';
+    const nonq = firstSite(ctx.corpus, mod.non_qualifying ?? []);
+    if (nonq) return 'not_met';
     return 'ambiguous';
-  };
+  }
+  return 'ambiguous';
+}
 
-  for (const fam of entered) {
-    for (const node of fam.nodes) {
-      resolutions.set(node.id, { node, family: fam, res: resolveNode(node, fam) });
-    }
+/** compute the criterion status of a single node. */
+function evalNode(node: LatticeNode, fam: LatticeFamily, ctx: CtxWithLattice): NodeStatus {
+  // shape=predicate physiologic criteria: pure value predicates, auto-satisfy, never prompt.
+  if (fam.shape === 'predicate' && node.predicate) {
+    const r = ctx.evalPredicate(node.predicate);
+    return r === true ? 'met' : 'not_met';
+  }
+  // delegated node (ANAT_PENETRATING -> PEN_SITE): defer to the delegate's family.
+  if (node.shape === 'delegated' && node.delegates_to) {
+    const [famId, nodeId] = node.delegates_to.split('.');
+    const dFam = ctx._lattice.families.find((f) => f.id === famId);
+    const dNode = dFam?.nodes.find((n) => n.id === nodeId);
+    if (dFam && dNode && familyEntered(ctx.corpus, dFam)) return evalNode(dNode, dFam, ctx);
+    return 'dormant';
+  }
+  // modifier-resolved node (empty affirm/negate on purpose).
+  if (node.resolved_by_modifier) return evalModifierNode(node, fam, ctx);
+
+  // affirm / negate lexicon node.
+  const negated = node.negate?.length ? anyPresent(ctx.corpus, node.negate) : false;
+  if (negated) return 'not_met';
+  const affirmed = node.affirm?.length ? anyPresent(ctx.corpus, node.affirm) : false;
+  if (affirmed) return 'met';
+  return 'ambiguous';
+}
+
+interface ScoredNode {
+  node: LatticeNode;
+  fam: LatticeFamily;
+  status: NodeStatus;
+}
+
+export function walk(lattice: ActivationLattice, base: WalkerCtx): WalkerResult {
+  const ctx: CtxWithLattice = Object.assign({ _lattice: lattice }, base) as CtxWithLattice;
+
+  const enteredFamilies = lattice.families.filter((f) => familyEntered(ctx.corpus, f));
+  const enteredIds = new Set(enteredFamilies.map((f) => f.id));
+
+  // families excluded by an entered family (MVC excludes FALL, etc.)
+  const excluded = new Set<string>();
+  for (const f of enteredFamilies) for (const x of f.excludes_families ?? []) excluded.add(x);
+
+  const active = enteredFamilies.filter((f) => !excluded.has(f.id));
+
+  // evaluate every node in active families
+  const scored: ScoredNode[] = [];
+  for (const fam of active) {
+    for (const node of fam.nodes) scored.push({ node, fam, status: evalNode(node, fam, ctx) });
   }
 
-  // ── step 4: block nodes whose depends_on isn't resolved ──
-  const isResolved = (id: string): boolean => {
-    const r = resolutions.get(id)?.res;
-    return r === 'met' || r === 'negative';
-  };
-  for (const [, entry] of resolutions) {
-    if (entry.res !== 'ambiguous') continue;
-    const deps = entry.node.depends_on ?? [];
-    if (deps.some((d) => resolutions.has(d) && !isResolved(d))) entry.res = 'blocked';
-  }
+  const statusById = new Map(scored.map((s) => [s.node.id, s.status]));
+  const negatedIds = new Set(
+    scored
+      .filter((s) => s.status === 'not_met' && s.node.negate?.length && anyPresent(ctx.corpus, s.node.negate!))
+      .map((s) => s.node.id),
+  );
 
-  // ── collect met criteria + fee-qualification ──
-  const criteriaMet: WalkerResult['criteriaMet'] = [];
-  for (const [, entry] of resolutions) {
-    if (entry.res === 'met' && entry.node.qualifies_alone && entry.node.criterion) {
-      criteriaMet.push({
-        category: entry.family.axis,
-        criterion: entry.node.criterion,
-        nodeId: entry.node.id,
-        evidence: entry.family.label,
-      });
-    }
-  }
+  // criteria met (criterion != null and status met)
+  const criteriaMet = scored
+    .filter((s) => s.status === 'met' && s.node.criterion)
+    .map((s) => ({
+      category: s.fam.axis,
+      criterion: s.node.criterion as string,
+      nodeId: s.node.id,
+      evidence: firstMatch(ctx.corpus, s.node.affirm)?.raw ?? s.node.criterion ?? '',
+    }));
   const anyCriterionSatisfied = criteriaMet.length > 0;
+  const feeQualified = anyCriterionSatisfied;
 
-  // ── step 5+6+7: prune immaterial, rank, render exactly one ──
-  const candidates = [...resolutions.values()].filter((e) => e.res === 'ambiguous');
-  const material = (node: LatticeNode): { arm: 'qualification' | 'documentation' | null } => {
-    const qualification = node.qualifies_alone && !anyCriterionSatisfied;
-    const documentation = node.registry_required;
-    if (qualification) return { arm: 'qualification' };
-    if (documentation) return { arm: 'documentation' };
-    return { arm: null };
-  };
+  // ── prompt candidate selection ──
+  const candidates = scored.filter((s) => {
+    if (s.status !== 'ambiguous') return false;
+    // only nodes that carry a prompt/ask are promptable (flat presence checks are not)
+    if (!s.node.prompt && !s.node.ask) return false;
+    // settle: family lexicon just landed — don't interrupt a sentence
+    const entSec = earliestPhraseSec(ctx.corpus, s.fam.enter_when.any_of ?? []);
+    if (entSec != null && ctx.nowSec - entSec < ctx.settleMs / 1000) return false;
+    // blocked: a depends_on dependency is still ambiguous
+    if ((s.node.depends_on ?? []).some((d) => statusById.get(d) === 'ambiguous')) return false;
+    // locked: node is unlocked only on negation of another node (on_negate.unlock)
+    const lockedBy = scored.find((o) => o.node.on_negate?.unlock?.includes(s.node.id));
+    if (lockedBy && !negatedIds.has(lockedBy.node.id)) return false;
+    // materiality: qualification (qualifies_alone && !feeQualified) OR documentation (registry_required)
+    const material = (s.node.qualifies_alone && !feeQualified) || s.node.registry_required;
+    return material;
+  });
 
-  const ranked = candidates
-    .map((e) => ({ ...e, mat: material(e.node) }))
-    .filter((e) => e.mat.arm !== null)
-    .sort((a, b) => b.node.info_gain - a.node.info_gain || a.node.id.localeCompare(b.node.id));
+  candidates.sort((a, b) => b.node.info_gain - a.node.info_gain || a.node.id.localeCompare(b.node.id));
 
+  const top = candidates[0];
   let prompt: WalkerResult['prompt'] = null;
-  if (ranked.length) {
-    const top = ranked[0];
-    const dist = parseDistanceFt(corpus);
-    const weapon = top.family.modifiers?.weapon
-      ? parseFrom(corpus, Object.values(top.family.modifiers.weapon.values ?? {}).flat())
-      : null;
-    let text = top.node.prompt ?? top.node.prompt_fallback ?? top.node.ask ?? 'Not captured.';
-    if (dist != null) text = text.replace('{distance}', `${dist} feet`);
-    if (weapon) text = text.replace('{weapon}', weapon);
-    if (text.includes('{distance}')) text = top.node.prompt_fallback ?? text.replace(/\{distance\}/g, '');
-    const qualifyingCriterion = criteriaMet[0]?.criterion ?? '';
-    const subline =
-      top.mat.arm === 'qualification'
-        ? top.node.prompt_subline_qualification
-        : (top.node.prompt_subline_documentation ?? '').replace('{qualifying_criterion}', qualifyingCriterion);
+  if (top) {
+    const distance = parseDistanceFt(ctx.corpus);
+    const qualifyingCriterion = criteriaMet[0]?.criterion ?? 'a captured criterion';
+    const isQual = top.node.qualifies_alone && !feeQualified;
+    let text = (distance ? top.node.prompt : top.node.prompt_fallback ?? top.node.prompt) ?? top.node.ask ?? '';
+    text = text.replace('{distance}', distance?.raw ?? '').replace('{qualifying_criterion}', qualifyingCriterion);
+    const subline = isQual ? top.node.prompt_subline_qualification : top.node.prompt_subline_documentation;
     prompt = {
       nodeId: top.node.id,
-      familyId: top.family.id,
+      familyId: top.fam.id,
       text: text.trim(),
-      subline: subline || undefined,
+      subline: subline?.replace('{qualifying_criterion}', qualifyingCriterion),
       infoGain: top.node.info_gain,
     };
   }
@@ -192,6 +209,6 @@ export function computeWalker(
     criteriaMet,
     anyCriterionSatisfied,
     prompt,
-    enteredFamilies: entered.map((f) => f.id),
+    enteredFamilies: [...enteredIds],
   };
 }
