@@ -54,6 +54,8 @@ function netlifyFunctionsDev(): Plugin {
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react(), tailwindcss(), netlifyFunctionsDev()],
+  // Honor the PORT env when the launcher assigns one (autoPort); else Vite's default.
+  server: { port: process.env.PORT ? Number(process.env.PORT) : undefined },
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
