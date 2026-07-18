@@ -179,6 +179,8 @@ export interface ObligationDef {
   clock?: ClockSpec;
   code_map?: CodeMapRow[];
   idempotency_key?: string;
+  /** escape hatch: override the derived recurrence class (unused in the catalog today). */
+  reactivation?: Recurrence;
   material_for: MaterialityArm[];
   facility_precondition?: { predicate: string; [k: string]: unknown };
   preconditions?: Record<string, unknown>;
@@ -194,6 +196,24 @@ export interface ObligationCatalog {
   state_machine: Record<string, unknown>;
   obligations: ObligationDef[];
   not_charged_but_captured?: Record<string, unknown>;
+}
+
+/* ───────────────────── reactivation-context guard ────────────────────── */
+
+/** one_time (default) · repeatable (per-unit, detect-only) · continuous (value/registry). */
+export type Recurrence = 'one_time' | 'repeatable' | 'continuous';
+
+/** the guard's observability record, populated only when it engages. */
+export interface ReactivationInfo {
+  recurrence: Recurrence;
+  /** atSec the gate first closed (over a strict prefix). */
+  originatingAtSec: number | null;
+  /** post-originating mentions of the same event (trigger or gating affirm). */
+  reactivations: number;
+  verdict: 'sameEvent' | 'newEvent';
+  /** true when the guard overrode a would-be de-satisfaction, holding `satisfied`. */
+  heldSatisfied: boolean;
+  signal?: 'no_fresh_evidence' | 'referential' | 'cross_obligation' | 'fresh_done_framed';
 }
 
 /** Runtime evaluation of one obligation at the current `now`. */
@@ -214,6 +234,8 @@ export interface ObligationRuntime {
   cptSelected?: string | null;
   dollarImpact?: number;
   terminal?: TerminalSpec;
+  /** reactivation-context guard record; present only when the guard engaged. */
+  reactivation?: ReactivationInfo;
 }
 
 /* ─────────────────────── activation lattice ──────────────────────── */
@@ -392,6 +414,11 @@ export interface EngineConfig {
   g0390Mode: 'decline_with_citation' | 'unattributed_pending';
   /** disposition sweep time (seconds); open+material obligations become `unresolved`. */
   dispositionSec: number;
+  /**
+   * Reactivation-context guard. 'off' (default) = no-op, canned demo byte-identical.
+   * 'on' engages the guard; the deterministic classifier keeps CI model-free.
+   */
+  reactivationMode?: 'off' | 'on';
 }
 
 /** The full deterministic recompute at a given `now`. Prompts are a pure render of this. */

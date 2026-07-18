@@ -25,6 +25,7 @@ import { computeScores } from './scores.ts';
 import { computeClocks } from './clocks.ts';
 import { walk, type WalkerCtx } from './walker.ts';
 import { evalLedger, type LedgerCtx } from './ledger.ts';
+import { deterministicClassifier } from './reactivation.ts';
 import { evalPredicate } from './predicates.ts';
 import { computeActivation, computeCharges } from './charges.ts';
 import { computeMeasures } from './measures.ts';
@@ -110,6 +111,7 @@ export function recompute(input: EngineInput, config: EngineConfig = defaultConf
       corpus, values, clocks, nowSec, resuscitationActive,
       latticeAnyCriterion: walker.anyCriterionSatisfied,
       obligationStates, dismissed, settleMs: config.settleMs,
+      reactivation: { mode: config.reactivationMode ?? 'off', classifier: deterministicClassifier },
     };
     runtimes = evalLedger(obligations, ledgerCtx);
 

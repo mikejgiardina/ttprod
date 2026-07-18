@@ -17,6 +17,11 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { buildCorpus, firstMatch, contains } from '../src/engine/matcher.ts';
+import { buildValues } from '../src/engine/values.ts';
+import { computeClocks } from '../src/engine/clocks.ts';
+import { evalLedger, type LedgerCtx } from '../src/engine/ledger.ts';
+import { deterministicClassifier } from '../src/engine/reactivation.ts';
+import type { ObligationDef, Utterance } from '../src/types.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const data = (p: string) => join(here, '..', 'src', 'data', p);
@@ -110,6 +115,40 @@ const behavioral: [string, boolean, boolean][] = [
 for (const [desc, actual, expected] of behavioral) {
   if (actual === expected) ok('BEHAVIORAL: ' + desc);
   else bad(`BEHAVIORAL: ${desc} (got ${actual}, expected ${expected})`);
+}
+
+// ── 4. reactivation-context guard (ledger-level, deterministic classifier, mode:'on') ──
+// The ledger path is JSON-free (matcher/clocks/predicates only), so this stays milliseconds
+// and model-free. Rows carry `lines` + `ledger_assert` instead of must_fire/must_not_fire.
+function reactivationRun(obId: string, lines: { atSec: number; text: string }[]) {
+  const utter: Utterance[] = lines.map((l) => ({ t_rel: '', atSec: l.atSec, text: l.text }));
+  const nowSec = Math.max(...lines.map((l) => l.atSec));
+  const corpus = buildCorpus(utter, nowSec);
+  const values = buildValues([], corpus, nowSec);
+  const clocks = computeClocks(corpus, values, nowSec);
+  const def = (obligations.obligations as ObligationDef[]).find((o) => o.id === obId);
+  if (!def) { bad(`reactivation: obligation ${obId} not found`); return undefined; }
+  const ctx: LedgerCtx = {
+    corpus, values, clocks, nowSec,
+    resuscitationActive: clocks.activationAtSec != null,
+    latticeAnyCriterion: false,
+    obligationStates: {}, dismissed: new Set<string>(), settleMs: 3000,
+    reactivation: { mode: 'on', classifier: deterministicClassifier },
+  };
+  return evalLedger([def], ctx)[0];
+}
+
+for (const row of corpusRows.filter((r) => r.class === 'reactivation')) {
+  const a = row.ledger_assert ?? {};
+  const rt = reactivationRun(row.obligationId, row.lines ?? []);
+  const r = rt?.reactivation;
+  const checks: string[] = [];
+  if (!r) checks.push('guard did not engage (no reactivation record)');
+  if (a.expect_state && rt?.state !== a.expect_state) checks.push(`state=${rt?.state}, expected ${a.expect_state}`);
+  if (a.expect_verdict && r?.verdict !== a.expect_verdict) checks.push(`verdict=${r?.verdict}, expected ${a.expect_verdict}`);
+  if (a.min_reactivations != null && (r?.reactivations ?? 0) < a.min_reactivations) checks.push(`reactivations=${r?.reactivations}, expected >=${a.min_reactivations}`);
+  if (checks.length) bad(`REACTIVATION: ${row.id} — ${checks.join('; ')}`);
+  else ok(`REACTIVATION: ${row.id} verdict=${r?.verdict} state=${rt?.state} reactivations=${r?.reactivations}`);
 }
 
 console.log(`\n${fail} failure(s), ${warn} warning(s).`);
