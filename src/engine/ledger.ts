@@ -21,6 +21,7 @@ import type { ClockState } from './clocks.ts';
 import { deferralSpokenFor, firstMatch } from './matcher.ts';
 import { deadlineElapsed } from './clocks.ts';
 import { evalPredicate, type EvalContext } from './predicates.ts';
+import { applyReactivation, type ReactivationClassifier } from './reactivation.ts';
 
 export interface LedgerCtx {
   corpus: Corpus;
@@ -34,6 +35,8 @@ export interface LedgerCtx {
   /** obligations the human has dismissed/deferred at the prompt surface. */
   dismissed: Set<string>;
   settleMs: number;
+  /** reactivation-context guard; absent or mode:'off' → no-op (canned demo byte-identical). */
+  reactivation?: { mode: 'off' | 'on'; classifier?: ReactivationClassifier };
 }
 
 interface AtomEval {
@@ -41,6 +44,7 @@ interface AtomEval {
   satisfied: boolean;
   flagged: boolean; // predicate returned 'unknown' (NEEDS-CODER/CLINICIAN) — counts as satisfied-but-flagged
   source?: string;
+  atSec?: number; // when the satisfying affirm hit landed (feeds the reactivation guard)
 }
 
 function predCtx(c: LedgerCtx): EvalContext {
@@ -63,7 +67,7 @@ function isNonGating(atom: Atom): boolean {
 /** an atom is satisfied if its affirm lexicon is present OR its predicate holds (unknown = flagged-satisfied). */
 function evalAtom(atom: Atom, c: LedgerCtx): AtomEval {
   const affirmHit = atom.affirm?.length ? firstMatch(c.corpus, atom.affirm) : null;
-  if (affirmHit) return { id: atom.id, satisfied: true, flagged: false, source: affirmHit.raw };
+  if (affirmHit) return { id: atom.id, satisfied: true, flagged: false, source: affirmHit.raw, atSec: affirmHit.atSec };
   if (atom.predicate) {
     const r = evalPredicate(atom.predicate, predCtx(c));
     if (r === 'unknown') return { id: atom.id, satisfied: true, flagged: true };
@@ -197,6 +201,16 @@ export function evalObligation(def: ObligationDef, c: LedgerCtx): ObligationRunt
   else if (satisfiedCount === 0) state = 'missing';
   else state = 'ambiguous';
 
+  // reactivation-context guard: hold an earned one-time satisfaction across references to
+  // the same already-completed event. mode:'off' (default) skips this entirely — the demo
+  // path is byte-identical by construction. Writes at most one field (`state`).
+  let reactivation: ObligationRuntime['reactivation'];
+  if (c.reactivation?.mode === 'on') {
+    const r = applyReactivation(def, { atoms, met, state }, c.corpus, c.reactivation.classifier);
+    state = r.state;
+    reactivation = r.reactivation;
+  }
+
   // human said "hold that / not now" about this obligation's trigger -> respect the decline
   const trigPhrases = def.trigger.any_of ?? [];
   const humanDeferred = c.dismissed.has(def.id) || deferralSpokenFor(c.corpus, trigPhrases);
@@ -229,6 +243,7 @@ export function evalObligation(def: ObligationDef, c: LedgerCtx): ObligationRunt
     cptSelected,
     dollarImpact: dollarImpact(def),
     terminal: def.terminal,
+    reactivation,
   };
 }
 
