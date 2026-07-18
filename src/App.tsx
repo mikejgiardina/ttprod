@@ -27,12 +27,6 @@ export default function App() {
     [state.utterances, state.readings, state.nowSec, dismissed],
   );
 
-  // lattice prompts aren't in the ledger's dismissed set — hide them here if tapped away
-  const activePrompt =
-    engine.activePrompt && engine.activePrompt.nodeId && dismissed.includes(engine.activePrompt.nodeId)
-      ? null
-      : engine.activePrompt;
-
   function dismiss(defer: boolean) {
     const p = engine.activePrompt;
     if (!p) return;
@@ -76,7 +70,7 @@ export default function App() {
 
       <DemographicsBar values={engine.values} />
 
-      <PromptSurface prompt={activePrompt} onResolve={() => dismiss(false)} onDefer={() => dismiss(true)} />
+      <PromptSurface prompt={engine.activePrompt} onResolve={() => dismiss(false)} onDefer={() => dismiss(true)} />
 
       <div className="grid gap-4 lg:grid-cols-3">
         <div className="flex flex-col gap-4 lg:col-span-2">
